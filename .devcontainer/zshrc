@@ -1,0 +1,80 @@
+export ZSH="$HOME/.oh-my-zsh"
+
+# Disable auto-update checks and compfix prompts so zsh never blocks interactive or probing sessions
+DISABLE_AUTO_UPDATE="true"
+DISABLE_UPDATE_PROMPT="true"
+ZSH_DISABLE_COMPFIX="true"
+
+# `agnoster` and friends need a patched font; `robbyrussell` renders correctly
+# in any terminal, which matters when this is on a projector.
+ZSH_THEME="robbyrussell"
+
+plugins=(
+  git
+  rust
+  zsh-autosuggestions
+  zsh-syntax-highlighting
+)
+
+source "$ZSH/oh-my-zsh.sh"
+
+# History worth having across container restarts.
+HISTSIZE=10000
+SAVEHIST=10000
+setopt HIST_IGNORE_ALL_DUPS INC_APPEND_HISTORY
+
+alias ll='ls -la'
+alias la='ls -A'
+alias sol='solana'
+alias anc='anchor'
+alias sp='surfpool'
+alias g='git'
+alias t='anchor test'
+alias tb='anchor test --skip-build'
+alias b='anchor build'
+alias tc='pnpm tsc --noEmit'
+
+# Workspace root shortcut
+ws() { cd "${LIVE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; }
+
+# `init <name>` sets up the whole project in the repo root: an Anchor
+# workspace named <name> plus a Next.js frontend in app/ (see `app` below).
+# `anchor init` refuses to run inside an existing directory, so the workspace
+# is created in a temp dir and moved up, folding Anchor's
+# .gitignore/.prettierignore entries into the existing ones.
+init() {
+  [[ -n "$1" ]] || { echo "usage: init <program_name>" >&2; return 1 }
+  local root="${LIVE_ROOT:-$PWD}" tmp f
+  [[ -e "$root/Anchor.toml" ]] && { echo "Anchor.toml already exists in $root" >&2; return 1 }
+  tmp="$(mktemp -d "$root/.anchor-init.XXXXXX")" || return 1
+  ( cd "$tmp" && anchor init --no-git --package-manager pnpm --test-template mocha "$1" ) || { rm -rf "$tmp"; return 1 }
+  for f in .gitignore .prettierignore; do
+    [[ -f "$root/$f" && -f "$tmp/$1/$f" ]] || continue
+    grep -vxFf <(grep -v '^$' "$root/$f") "$tmp/$1/$f" >> "$root/$f"
+    rm "$tmp/$1/$f"
+  done
+  mv "$tmp/$1"/*(D) "$root/" && rmdir "$tmp/$1" "$tmp" || return 1
+  # Anchor pins its own Rust; use the one the Dockerfile pre-installs instead.
+  [[ -n "$RUST_VERSION" && -f "$root/rust-toolchain.toml" ]] \
+    && sed -i "s/^channel = .*/channel = \"$RUST_VERSION\"/" "$root/rust-toolchain.toml"
+  # Anchor's tsconfig has no `include`, so tsc would also sweep up app/ and its
+  # own @types/node, producing hundreds of duplicate-definition errors.
+  ( cd "$root" && node -e 'const f="tsconfig.json",j=require("./"+f);j.include=["tests","migrations"];require("fs").writeFileSync(f,JSON.stringify(j,null,2)+"\n")' )
+  app
+}
+
+# `app [name]` scaffolds a Next.js + Tailwind + @solana/kit frontend from the
+# official solana-foundation template into <name>/ (default: app) under the
+# repo root. Frontend-only on purpose: the on-chain side comes from `init`.
+# `anchor init` leaves an empty app/ placeholder, which create-solana-dapp
+# refuses to write into — drop it if it is empty.
+app() {
+  local root="${LIVE_ROOT:-$PWD}" dir="${1:-app}"
+  [[ -d "$root/$dir" ]] && rmdir "$root/$dir" 2>/dev/null
+  ( cd "$root" && pnpm dlx create-solana-dapp@latest -t nextjs --pm pnpm --skip-git "$dir" )
+}
+
+if [[ -o interactive ]]; then
+  print -P "%F{45}live%f — Solana bootcamp"
+  print -P "  %F{244}init <name>%f  anchor program + next.js app   %F{244}t%f  anchor test   %F{244}tc%f  typecheck"
+fi
